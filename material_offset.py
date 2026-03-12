@@ -1,14 +1,24 @@
 from math import isnan
 
+# Типичные имена объектов камеры в Klipper (heater_generic / temperature_sensor)
+CHAMBER_SENSOR_CANDIDATES = [
+    'heater_generic chamber',
+    'temperature_sensor chamber',
+    'chamber',
+]
+
 class MaterialOffset:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         self.records = []
         self.saved_offset = 0.0
         self.active = False
         self.gcode_move = None
         self.toolhead = None
+        # Опциональное имя датчика камеры (если не задано — пробуем стандартные)
+        self.chamber_sensor_name = config.get('chamber_sensor', None)
         # Парсинг конфигурации
         prefix = 'material_offset '
         sections = config.get_prefix_sections(prefix)
@@ -88,14 +98,28 @@ class MaterialOffset:
                     raise self.printer.config_error(
                         f"Temperature ranges overlap between records {i+1} and {j+1}")
 
-    def _get_heater_temp(self, name):
+    def _get_temp(self, name):
+        """Получает температуру по имени объекта (heater, temperature_sensor и т.д.)."""
         try:
-            heater = self.printer.lookup_object(name)
-            if hasattr(heater, 'get_status'):
-                status = heater.get_status(0)
-                return status['temperature']
-        except:
-            return None
+            obj = self.printer.lookup_object(name)
+            if hasattr(obj, 'get_status'):
+                eventtime = self.reactor.monotonic()
+                status = obj.get_status(eventtime)
+                temp = status.get('temperature')
+                if temp is not None and not isnan(temp):
+                    return float(temp)
+        except Exception:
+            pass
+        return None
+
+    def _get_chamber_temp(self):
+        """Получает температуру камеры. В Klipper камера обычно: heater_generic chamber или temperature_sensor chamber."""
+        if self.chamber_sensor_name:
+            return self._get_temp(self.chamber_sensor_name)
+        for name in CHAMBER_SENSOR_CANDIDATES:
+            temp = self._get_temp(name)
+            if temp is not None:
+                return temp
         return None
 
     cmd_MATERIAL_OFFSET_ENABLE_help = "Enable material-based Z offset"
@@ -103,12 +127,12 @@ class MaterialOffset:
         if self.toolhead is None:
             raise gcmd.error("Printer not ready")
         # Получение текущих температур
-        extruder_temp = self._get_heater_temp('extruder')
-        bed_temp = self._get_heater_temp('heater_bed')
-        chamber_temp = self._get_heater_temp('chamber')
-        if extruder_temp is None or isnan(extruder_temp):
+        extruder_temp = self._get_temp('extruder')
+        bed_temp = self._get_temp('heater_bed')
+        chamber_temp = self._get_chamber_temp()
+        if extruder_temp is None:
             raise gcmd.error("Extruder temperature not available")
-        if bed_temp is None or isnan(bed_temp):
+        if bed_temp is None:
             raise gcmd.error("Bed temperature not available")
         # Поиск подходящей записи
         matched_record = None
@@ -128,11 +152,15 @@ class MaterialOffset:
             matched_record = record
             break
         if matched_record is None:
+            needs_chamber = any(r['chamber'][0] is not None for r in self.records)
             msg = "No material offset found for current temperatures:\n"
-            msg += f"Extruder: {extruder_temp:.1f}°C, "
-            msg += f"Bed: {bed_temp:.1f}°C"
+            msg += f"  Extruder: {extruder_temp:.1f}°C, Bed: {bed_temp:.1f}°C"
             if chamber_temp is not None:
                 msg += f", Chamber: {chamber_temp:.1f}°C"
+            else:
+                msg += f", Chamber: not available"
+                if needs_chamber:
+                    msg += " (required for matching record; add chamber_sensor to [material_offset] if name differs)"
             gcmd.respond_info(msg)
             return
         # Применение нового смещения
