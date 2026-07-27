@@ -209,7 +209,7 @@ class MaterialOffset:
                 parts.append('%s: %.1f°C' % (label, temp))
         return ', '.join(parts)
 
-    cmd_MATERIAL_OFFSET_ENABLE_help = 'Включить Z-offset по материалу'
+    cmd_MATERIAL_OFFSET_ENABLE_help = 'Контроль высоты первого слоя активирован'
 
     def cmd_MATERIAL_OFFSET_ENABLE(self, gcmd):
         if self.toolhead is None or self.gcode_move is None:
@@ -252,11 +252,11 @@ class MaterialOffset:
             % (matched['name'], self.applied_offset, used, self._format_temps(temps))
         )
 
-    cmd_MATERIAL_OFFSET_DISABLE_help = 'Выключить Z-offset по материалу'
+    cmd_MATERIAL_OFFSET_DISABLE_help = 'Отключить контроль высоты первого слоя'
 
     def cmd_MATERIAL_OFFSET_DISABLE(self, gcmd):
         if not self.active:
-            gcmd.respond_info('Смещение материала не активно')
+            gcmd.respond_info('Контроль высоты первого слоя отключен')
             return
         self.gcode.run_script_from_command(
             'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (-self.applied_offset,)
@@ -267,7 +267,7 @@ class MaterialOffset:
         self.active_preset = None
         self.active = False
         gcmd.respond_info(
-            "Смещение материала '%s' отключено. Снят Z_ADJUST: %.4fмм"
+            "Смещение материала '%s' отключено. Возвращен Z_ADJUST: %.4fмм"
             % (preset, removed)
         )
 
