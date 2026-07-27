@@ -10,7 +10,8 @@
 ## Команды
 
 - `MATERIAL_OFFSET_ENABLE` — применить offset
-- `MATERIAL_OFFSET_DISABLE` — вернуть прежний Z-offset
+- `MATERIAL_OFFSET_DISABLE` — снять offset
+- `change_material_offset` — переключить флаг `save_variables` (`change_material_offset`) для своих стартовых/конечных макросов
 
 ## Установка
 

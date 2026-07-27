@@ -42,6 +42,7 @@ class MaterialOffset:
         self.gcode = self.printer.lookup_object('gcode')
         self.records = []
         self.applied_offset = 0.0
+        self.active_preset = None
         self.active = False
         self.gcode_move = None
         self.toolhead = None
@@ -209,7 +210,10 @@ class MaterialOffset:
         if self.toolhead is None or self.gcode_move is None:
             raise gcmd.error('Printer not ready')
         if self.active:
-            gcmd.respond_info('Material offset is already active')
+            gcmd.respond_info(
+                "Material offset already active: '%s' Z_ADJUST=%.4fmm"
+                % (self.active_preset, self.applied_offset)
+            )
             return
 
         temps = self._read_temperatures()
@@ -227,6 +231,7 @@ class MaterialOffset:
             return
 
         self.applied_offset = matched['offset']
+        self.active_preset = matched['name']
         self.gcode.run_script_from_command(
             'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (self.applied_offset,)
         )
@@ -252,10 +257,13 @@ class MaterialOffset:
             'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (-self.applied_offset,)
         )
         removed = self.applied_offset
+        preset = self.active_preset
         self.applied_offset = 0.0
+        self.active_preset = None
         self.active = False
         gcmd.respond_info(
-            'Material offset disabled. Removed Z_ADJUST: %.4fmm' % (removed,)
+            "Material offset '%s' disabled. Removed Z_ADJUST: %.4fmm"
+            % (preset, removed)
         )
 
 
