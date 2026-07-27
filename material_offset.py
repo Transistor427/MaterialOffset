@@ -26,12 +26,12 @@ def _ranges_overlap(a, b):
 def _parse_range(section, value):
     parts = value.split(':', 1)
     if len(parts) != 2:
-        raise section.error("Invalid range format: %s" % (value,))
+        raise section.error("Неверный формат диапазона: %s" % (value,))
     try:
         v1 = float(parts[0].strip())
         v2 = float(parts[1].strip())
     except ValueError:
-        raise section.error("Invalid numbers in range: %s" % (value,))
+        raise section.error("Неверные числа в диапазоне: %s" % (value,))
     return (min(v1, v2), max(v1, v2))
 
 
@@ -60,12 +60,12 @@ class MaterialOffset:
                 self.records.append(self._parse_record(section))
             except Exception as e:
                 raise config.error(
-                    "Error in section '%s': %s" % (section.get_name(), str(e))
+                    "Ошибка в секции '%s': %s" % (section.get_name(), str(e))
                 )
 
         if not self.records:
             raise config.error(
-                "No [material_offset <name>] preset sections defined"
+                "Не заданы секции пресетов [material_offset <name>]"
             )
 
         self._check_conflicts()
@@ -91,7 +91,7 @@ class MaterialOffset:
                 heaters[key] = _parse_range(section, raw)
         if not heaters:
             raise section.error(
-                "At least one of extruder, bed, chamber must be specified"
+                "Нужно указать хотя бы один из параметров: extruder, bed, chamber"
             )
         return {
             'name': section.get_name().split(None, 1)[-1],
@@ -116,7 +116,7 @@ class MaterialOffset:
                 r2 = self.records[j]
                 if self._presets_conflict(r1, r2):
                     raise self.printer.config_error(
-                        "Temperature ranges conflict between presets '%s' and '%s'"
+                        "Конфликт диапазонов температур между пресетами '%s' и '%s'"
                         % (r1['name'], r2['name'])
                     )
 
@@ -194,24 +194,29 @@ class MaterialOffset:
         return best, None
 
     def _format_temps(self, temps):
+        labels = {
+            'extruder': 'Экструдер',
+            'bed': 'Стол',
+            'chamber': 'Камера',
+        }
         parts = []
         for key in HEATER_KEYS:
             temp = temps.get(key)
-            label = key.capitalize()
+            label = labels[key]
             if temp is None:
-                parts.append('%s: n/a' % (label,))
+                parts.append('%s: н/д' % (label,))
             else:
-                parts.append('%s: %.1fC' % (label, temp))
+                parts.append('%s: %.1f°C' % (label, temp))
         return ', '.join(parts)
 
-    cmd_MATERIAL_OFFSET_ENABLE_help = 'Enable material-based Z offset'
+    cmd_MATERIAL_OFFSET_ENABLE_help = 'Включить Z-offset по материалу'
 
     def cmd_MATERIAL_OFFSET_ENABLE(self, gcmd):
         if self.toolhead is None or self.gcode_move is None:
-            raise gcmd.error('Printer not ready')
+            raise gcmd.error('Принтер не готов')
         if self.active:
             gcmd.respond_info(
-                "Material offset already active: '%s' Z_ADJUST=%.4fmm"
+                "Смещение материала уже активно: '%s' Z_ADJUST=%.4fмм"
                 % (self.active_preset, self.applied_offset)
             )
             return
@@ -220,12 +225,12 @@ class MaterialOffset:
         matched, ambiguous = self._find_best_match(temps)
         if ambiguous:
             raise gcmd.error(
-                'Ambiguous material offset match for presets: %s\n  %s'
+                'Неоднозначное совпадение пресетов смещения: %s\n  %s'
                 % (ambiguous, self._format_temps(temps))
             )
         if matched is None:
             gcmd.respond_info(
-                'No material offset found for current temperatures:\n  %s'
+                'Не найдено смещение материала для текущих температур:\n  %s'
                 % (self._format_temps(temps),)
             )
             return
@@ -243,15 +248,15 @@ class MaterialOffset:
             if k in matched['heaters']
         )
         gcmd.respond_info(
-            "Material offset '%s' applied: Z_ADJUST=%.4fmm (%s)\n  %s"
+            "Смещение материала '%s' применено: Z_ADJUST=%.4fмм (%s)\n  %s"
             % (matched['name'], self.applied_offset, used, self._format_temps(temps))
         )
 
-    cmd_MATERIAL_OFFSET_DISABLE_help = 'Disable material-based Z offset'
+    cmd_MATERIAL_OFFSET_DISABLE_help = 'Выключить Z-offset по материалу'
 
     def cmd_MATERIAL_OFFSET_DISABLE(self, gcmd):
         if not self.active:
-            gcmd.respond_info('Material offset is not active')
+            gcmd.respond_info('Смещение материала не активно')
             return
         self.gcode.run_script_from_command(
             'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (-self.applied_offset,)
@@ -262,7 +267,7 @@ class MaterialOffset:
         self.active_preset = None
         self.active = False
         gcmd.respond_info(
-            "Material offset '%s' disabled. Removed Z_ADJUST: %.4fmm"
+            "Смещение материала '%s' отключено. Снят Z_ADJUST: %.4fмм"
             % (preset, removed)
         )
 
