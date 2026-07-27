@@ -41,7 +41,6 @@ class MaterialOffset:
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         self.records = []
-        self.saved_offset = 0.0
         self.applied_offset = 0.0
         self.active = False
         self.gcode_move = None
@@ -227,11 +226,9 @@ class MaterialOffset:
             )
             return
 
-        self.saved_offset = self.gcode_move.homing_origin[2]
         self.applied_offset = matched['offset']
-        new_offset = self.saved_offset + self.applied_offset
         self.gcode.run_script_from_command(
-            'SET_GCODE_OFFSET Z=%.6f' % (new_offset,)
+            'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (self.applied_offset,)
         )
         self.active = True
 
@@ -241,7 +238,7 @@ class MaterialOffset:
             if k in matched['heaters']
         )
         gcmd.respond_info(
-            "Material offset '%s' applied: Z=%.4fmm (%s)\n  %s"
+            "Material offset '%s' applied: Z_ADJUST=%.4fmm (%s)\n  %s"
             % (matched['name'], self.applied_offset, used, self._format_temps(temps))
         )
 
@@ -252,13 +249,13 @@ class MaterialOffset:
             gcmd.respond_info('Material offset is not active')
             return
         self.gcode.run_script_from_command(
-            'SET_GCODE_OFFSET Z=%.6f' % (self.saved_offset,)
+            'SET_GCODE_OFFSET Z_ADJUST=%.6f' % (-self.applied_offset,)
         )
-        self.active = False
-        restored = self.saved_offset
+        removed = self.applied_offset
         self.applied_offset = 0.0
+        self.active = False
         gcmd.respond_info(
-            'Material offset disabled. Restored Z offset: %.4fmm' % (restored,)
+            'Material offset disabled. Removed Z_ADJUST: %.4fmm' % (removed,)
         )
 
 

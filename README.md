@@ -15,7 +15,7 @@
 ## Установка
 
 ```bash
-cd ~ && git clone https://github.com/Transistor427/MaterialOffset.git && sudo ln -s ~/MaterialOffset/material_offset.py ~/klipper/klippy/extras/material_offset.py
+cd ~ && git clone -b v2 https://github.com/Transistor427/MaterialOffset.git && sudo ln -s ~/MaterialOffset/material_offset.py ~/klipper/klippy/extras/material_offset.py
 ```
 
 Подключить конфиг (или скопировать пресеты из `material_offset.cfg`):
