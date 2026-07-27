@@ -1,11 +1,39 @@
 from math import isnan
 
-# Типичные имена объектов камеры в Klipper (heater_generic / temperature_sensor)
-CHAMBER_SENSOR_CANDIDATES = [
+# Heater keys used in material preset sections
+HEATER_KEYS = ('extruder', 'bed', 'chamber')
+
+# Default Klipper object names for each heater key
+DEFAULT_HEATER_OBJECTS = {
+    'extruder': 'extruder',
+    'bed': 'heater_bed',
+    'chamber': None,  # resolved via chamber_sensor or auto-detect
+}
+
+# Typical chamber object names in Klipper
+CHAMBER_SENSOR_CANDIDATES = (
     'heater_generic chamber',
     'temperature_sensor chamber',
     'chamber',
-]
+)
+
+
+def _ranges_overlap(a, b):
+    """Return True if closed intervals a and b overlap."""
+    return a[0] <= b[1] and b[0] <= a[1]
+
+
+def _parse_range(section, value):
+    parts = value.split(':', 1)
+    if len(parts) != 2:
+        raise section.error("Invalid range format: %s" % (value,))
+    try:
+        v1 = float(parts[0].strip())
+        v2 = float(parts[1].strip())
+    except ValueError:
+        raise section.error("Invalid numbers in range: %s" % (value,))
+    return (min(v1, v2), max(v1, v2))
+
 
 class MaterialOffset:
     def __init__(self, config):
@@ -14,97 +42,112 @@ class MaterialOffset:
         self.gcode = self.printer.lookup_object('gcode')
         self.records = []
         self.saved_offset = 0.0
+        self.applied_offset = 0.0
         self.active = False
         self.gcode_move = None
         self.toolhead = None
-        # Опциональное имя датчика камеры (если не задано — пробуем стандартные)
-        self.chamber_sensor_name = config.get('chamber_sensor', None)
-        # Парсинг конфигурации
+
+        # Optional object-name overrides in [material_offset]
+        self.heater_objects = {
+            'extruder': config.get('extruder_sensor', DEFAULT_HEATER_OBJECTS['extruder']),
+            'bed': config.get('bed_sensor', DEFAULT_HEATER_OBJECTS['bed']),
+            'chamber': config.get('chamber_sensor', None),
+        }
+
         prefix = 'material_offset '
-        sections = config.get_prefix_sections(prefix)
-        for section in sections:
+        for section in config.get_prefix_sections(prefix):
             try:
-                # Извлечение параметров записи
-                offset = section.getfloat('offset')
-                extruder_range = section.get('extruder')
-                bed_range = section.get('heater_bed')
-                chamber_range = section.get('chamber', None)
-                # Парсинг диапазонов температур
-                def parse_range(s):
-                    parts = s.split(':', 1)
-                    if len(parts) != 2:
-                        raise section.error(f"Invalid range format: {s}")
-                    try:
-                        v1 = float(parts[0].strip())
-                        v2 = float(parts[1].strip())
-                        return min(v1, v2), max(v1, v2)
-                    except ValueError:
-                        raise section.error(f"Invalid numbers in range: {s}")
-                extruder_min, extruder_max = parse_range(extruder_range)
-                bed_min, bed_max = parse_range(bed_range)
-                chamber_min = chamber_max = None
-                if chamber_range:
-                    chamber_min, chamber_max = parse_range(chamber_range)
-                # Сохранение записи
-                self.records.append({
-                    'offset': offset,
-                    'extruder': (extruder_min, extruder_max),
-                    'bed': (bed_min, bed_max),
-                    'chamber': (chamber_min, chamber_max)
-                })
+                self.records.append(self._parse_record(section))
             except Exception as e:
-                raise config.error(f"Error in section '{section.get_name()}': {str(e)}")
-        # Проверка конфликтов диапазонов
+                raise config.error(
+                    "Error in section '%s': %s" % (section.get_name(), str(e))
+                )
+
+        if not self.records:
+            raise config.error(
+                "No [material_offset <name>] preset sections defined"
+            )
+
         self._check_conflicts()
-        # Регистрация команд G-кода
+
         self.gcode.register_command(
             'MATERIAL_OFFSET_ENABLE',
             self.cmd_MATERIAL_OFFSET_ENABLE,
-            desc=self.cmd_MATERIAL_OFFSET_ENABLE_help
+            desc=self.cmd_MATERIAL_OFFSET_ENABLE_help,
         )
         self.gcode.register_command(
             'MATERIAL_OFFSET_DISABLE',
             self.cmd_MATERIAL_OFFSET_DISABLE,
-            desc=self.cmd_MATERIAL_OFFSET_DISABLE_help
+            desc=self.cmd_MATERIAL_OFFSET_DISABLE_help,
         )
-        # Инициализация объектов принтера
-        self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+
+    def _parse_record(self, section):
+        offset = section.getfloat('offset')
+        heaters = {}
+        for key in HEATER_KEYS:
+            raw = section.get(key, None)
+            if raw is not None:
+                heaters[key] = _parse_range(section, raw)
+        if not heaters:
+            raise section.error(
+                "At least one of extruder, bed, chamber must be specified"
+            )
+        return {
+            'name': section.get_name().split(None, 1)[-1],
+            'offset': offset,
+            'heaters': heaters,
+        }
 
     def _handle_ready(self):
         self.gcode_move = self.printer.lookup_object('gcode_move')
         self.toolhead = self.printer.lookup_object('toolhead')
 
     def _check_conflicts(self):
+        """Reject presets that cannot be disambiguated by specificity.
+
+        Overlap is allowed when one preset's heater set is a proper subset of
+        another's (e.g. ABS without chamber vs ABS HT with chamber). Matching
+        then prefers the more specific preset.
+        """
         for i in range(len(self.records)):
             for j in range(i + 1, len(self.records)):
                 r1 = self.records[i]
                 r2 = self.records[j]
-                # Проверка пересечения по экструдеру
-                extruder_intersect = (r1['extruder'][0] <= r2['extruder'][1] and
-                                      r2['extruder'][0] <= r1['extruder'][1])
-                # Проверка пересечения по столу
-                bed_intersect = (r1['bed'][0] <= r2['bed'][1] and
-                                 r2['bed'][0] <= r1['bed'][1])
-                # Проверка пересечения по камере
-                chamber_intersect = False
-                if r1['chamber'][0] is not None and r2['chamber'][0] is not None:
-                    chamber_intersect = (r1['chamber'][0] <= r2['chamber'][1] and
-                                         r2['chamber'][0] <= r1['chamber'][1])
-                # Проверка полного пересечения
-                full_intersect = extruder_intersect and bed_intersect
-                if r1['chamber'][0] is not None and r2['chamber'][0] is not None:
-                    full_intersect = full_intersect and chamber_intersect
-                if full_intersect:
+                if self._presets_conflict(r1, r2):
                     raise self.printer.config_error(
-                        f"Temperature ranges overlap between records {i+1} and {j+1}")
+                        "Temperature ranges conflict between presets '%s' and '%s'"
+                        % (r1['name'], r2['name'])
+                    )
+
+    def _presets_conflict(self, r1, r2):
+        keys1 = set(r1['heaters'])
+        keys2 = set(r2['heaters'])
+        shared = keys1 & keys2
+
+        if shared:
+            for key in shared:
+                if not _ranges_overlap(r1['heaters'][key], r2['heaters'][key]):
+                    return False
+        elif keys1 and keys2:
+            # No common heaters: both can match the same printer state
+            return True
+
+        if keys1 == keys2:
+            return True
+        # Proper subset: more specific preset wins at match time
+        if keys1 < keys2 or keys2 < keys1:
+            return False
+        # Incomparable heater sets with overlapping shared ranges
+        return True
 
     def _get_temp(self, name):
-        """Получает температуру по имени объекта (heater, temperature_sensor и т.д.)."""
+        if not name:
+            return None
         try:
             obj = self.printer.lookup_object(name)
             if hasattr(obj, 'get_status'):
-                eventtime = self.reactor.monotonic()
-                status = obj.get_status(eventtime)
+                status = obj.get_status(self.reactor.monotonic())
                 temp = status.get('temperature')
                 if temp is not None and not isnan(temp):
                     return float(temp)
@@ -113,80 +156,111 @@ class MaterialOffset:
         return None
 
     def _get_chamber_temp(self):
-        """Получает температуру камеры. В Klipper камера обычно: heater_generic chamber или temperature_sensor chamber."""
-        if self.chamber_sensor_name:
-            return self._get_temp(self.chamber_sensor_name)
+        if self.heater_objects['chamber']:
+            return self._get_temp(self.heater_objects['chamber'])
         for name in CHAMBER_SENSOR_CANDIDATES:
             temp = self._get_temp(name)
             if temp is not None:
                 return temp
         return None
 
-    cmd_MATERIAL_OFFSET_ENABLE_help = "Enable material-based Z offset"
-    def cmd_MATERIAL_OFFSET_ENABLE(self, gcmd):
-        if self.toolhead is None:
-            raise gcmd.error("Printer not ready")
-        # Получение текущих температур
-        extruder_temp = self._get_temp('extruder')
-        bed_temp = self._get_temp('heater_bed')
-        chamber_temp = self._get_chamber_temp()
-        if extruder_temp is None:
-            raise gcmd.error("Extruder temperature not available")
-        if bed_temp is None:
-            raise gcmd.error("Bed temperature not available")
-        # Поиск подходящей записи
-        matched_record = None
-        for record in self.records:
-            # Проверка диапазона экструдера
-            if not (record['extruder'][0] <= extruder_temp <= record['extruder'][1]):
-                continue
-            # Проверка диапазона стола
-            if not (record['bed'][0] <= bed_temp <= record['bed'][1]):
-                continue
-            # Проверка диапазона камеры (если указан)
-            if record['chamber'][0] is not None:
-                if chamber_temp is None or isnan(chamber_temp):
-                    continue
-                if not (record['chamber'][0] <= chamber_temp <= record['chamber'][1]):
-                    continue
-            matched_record = record
-            break
-        if matched_record is None:
-            needs_chamber = any(r['chamber'][0] is not None for r in self.records)
-            msg = "No material offset found for current temperatures:\n"
-            msg += f"  Extruder: {extruder_temp:.1f}°C, Bed: {bed_temp:.1f}°C"
-            if chamber_temp is not None:
-                msg += f", Chamber: {chamber_temp:.1f}°C"
+    def _read_temperatures(self):
+        temps = {
+            'extruder': self._get_temp(self.heater_objects['extruder']),
+            'bed': self._get_temp(self.heater_objects['bed']),
+            'chamber': self._get_chamber_temp(),
+        }
+        return temps
+
+    def _record_matches(self, record, temps):
+        for key, (tmin, tmax) in record['heaters'].items():
+            temp = temps.get(key)
+            if temp is None or isnan(temp):
+                return False
+            if not (tmin <= temp <= tmax):
+                return False
+        return True
+
+    def _find_best_match(self, temps):
+        matches = [r for r in self.records if self._record_matches(r, temps)]
+        if not matches:
+            return None, None
+        matches.sort(key=lambda r: len(r['heaters']), reverse=True)
+        best = matches[0]
+        tied = [r for r in matches if len(r['heaters']) == len(best['heaters'])]
+        if len(tied) > 1:
+            names = ', '.join(r['name'] for r in tied)
+            return None, names
+        return best, None
+
+    def _format_temps(self, temps):
+        parts = []
+        for key in HEATER_KEYS:
+            temp = temps.get(key)
+            label = key.capitalize()
+            if temp is None:
+                parts.append('%s: n/a' % (label,))
             else:
-                msg += f", Chamber: not available"
-                if needs_chamber:
-                    msg += " (required for matching record; add chamber_sensor to [material_offset] if name differs)"
-            gcmd.respond_info(msg)
+                parts.append('%s: %.1fC' % (label, temp))
+        return ', '.join(parts)
+
+    cmd_MATERIAL_OFFSET_ENABLE_help = 'Enable material-based Z offset'
+
+    def cmd_MATERIAL_OFFSET_ENABLE(self, gcmd):
+        if self.toolhead is None or self.gcode_move is None:
+            raise gcmd.error('Printer not ready')
+        if self.active:
+            gcmd.respond_info('Material offset is already active')
             return
-        # Применение нового смещения
-        offset_val = matched_record['offset']
-        # Вычисляем абсолютное смещение для установки
-        new_offset = self.saved_offset + offset_val
-        self.gcode.run_script_from_command(f"SET_GCODE_OFFSET Z={new_offset:.6f}")
+
+        temps = self._read_temperatures()
+        matched, ambiguous = self._find_best_match(temps)
+        if ambiguous:
+            raise gcmd.error(
+                'Ambiguous material offset match for presets: %s\n  %s'
+                % (ambiguous, self._format_temps(temps))
+            )
+        if matched is None:
+            gcmd.respond_info(
+                'No material offset found for current temperatures:\n  %s'
+                % (self._format_temps(temps),)
+            )
+            return
+
+        self.saved_offset = self.gcode_move.homing_origin[2]
+        self.applied_offset = matched['offset']
+        new_offset = self.saved_offset + self.applied_offset
+        self.gcode.run_script_from_command(
+            'SET_GCODE_OFFSET Z=%.6f' % (new_offset,)
+        )
         self.active = True
+
+        used = ', '.join(
+            '%s %.0f:%.0f' % (k, matched['heaters'][k][0], matched['heaters'][k][1])
+            for k in HEATER_KEYS
+            if k in matched['heaters']
+        )
         gcmd.respond_info(
-            f"Material offset applied: Z={offset_val:.4f}mm\n"
-            f"Temperatures - Extruder: {extruder_temp:.1f}°C, "
-            f"Bed: {bed_temp:.1f}°C"
-            + (f", Chamber: {chamber_temp:.1f}°C" if chamber_temp is not None else "")
+            "Material offset '%s' applied: Z=%.4fmm (%s)\n  %s"
+            % (matched['name'], self.applied_offset, used, self._format_temps(temps))
         )
 
-    cmd_MATERIAL_OFFSET_DISABLE_help = "Disable material-based Z offset"
+    cmd_MATERIAL_OFFSET_DISABLE_help = 'Disable material-based Z offset'
+
     def cmd_MATERIAL_OFFSET_DISABLE(self, gcmd):
         if not self.active:
-            gcmd.respond_info("Material offset is not active")
+            gcmd.respond_info('Material offset is not active')
             return
-        # Восстановление оригинального смещения
-        self.gcode.run_script_from_command(f"SET_GCODE_OFFSET Z={self.saved_offset:.6f}")
-        self.active = False
-        gcmd.respond_info(
-            f"Material offset disabled. Restored Z offset: {self.saved_offset:.4f}mm"
+        self.gcode.run_script_from_command(
+            'SET_GCODE_OFFSET Z=%.6f' % (self.saved_offset,)
         )
+        self.active = False
+        restored = self.saved_offset
+        self.applied_offset = 0.0
+        gcmd.respond_info(
+            'Material offset disabled. Restored Z offset: %.4fmm' % (restored,)
+        )
+
 
 def load_config(config):
     return MaterialOffset(config)
