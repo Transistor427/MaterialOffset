@@ -14,10 +14,12 @@
 
 ## Установка
 
-Скопировать `material_offset.py` в каталог модулей Klipper и подключить конфиг:
+```bash
+cd ~ && git clone https://github.com/Transistor427/MaterialOffset.git && sudo ln -s ~/MaterialOffset/material_offset.py ~/klipper/klippy/extras/material_offset.py
+```
+
+Подключить конфиг (или скопировать пресеты из `material_offset.cfg`):
 
 ```ini
 [include material_offset.cfg]
 ```
-
-Пример пресетов — в `material_offset.cfg`.
